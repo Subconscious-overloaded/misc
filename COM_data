@@ -1,0 +1,133 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import struct
+import serial
+import time
+from matplotlib.widgets import Button
+
+# Serial setup (adjust as needed)
+ser = serial.Serial("COM10", baudrate=256000, timeout=0.01)  # Adjust port & timeout
+
+# Constants
+FRAME_SIZE = 4  # 4 int16 values per frame
+BUFFER_SIZE = 200  # Number of samples to store
+BYTE_PER_FRAME = FRAME_SIZE * 2  # 2 bytes per int16 value
+
+# Initialize figure with 4 subplots
+fig, axes = plt.subplots(FRAME_SIZE, 1, figsize=(8, 8), sharex=True)
+plt.subplots_adjust(bottom=0.4)  # Space for buttons
+
+x_data = np.arange(BUFFER_SIZE)  # X-axis (0 to 999)
+y_data = np.zeros((FRAME_SIZE, BUFFER_SIZE))  # 4 channels of data
+
+# Define colors for each channel
+colors = ['b', 'r', 'g', 'm']
+lines = []
+
+# Initialize subplots
+for i in range(FRAME_SIZE):
+    axes[i].set_xlim(0, BUFFER_SIZE)
+    axes[i].set_ylim(-32768, 32767)  # Full int16 range
+    axes[i].set_ylabel(f"Ch {i+1}")
+    axes[i].grid(True)
+    line, = axes[i].plot(x_data, y_data[i], color=colors[i], label=f'Ch {i+1}')
+    lines.append(line)
+
+axes[-1].set_xlabel("Samples")  # X label only on the last subplot
+axes[0].set_title("Live Serial Data Plot (4 Channels)")
+
+# Buffer for incomplete reads
+byte_buffer = b''
+last_time = time.time()
+byte_count = 0
+text_box = plt.figtext(0.5, 0.9, "Bytes/sec: 0", ha="left", fontsize=12, bbox={"facecolor":"white", "alpha":0.5})
+
+def read_serial_data():
+    """ Read and process serial data, ensuring full frames of 4 int16 values. """
+    global byte_buffer, byte_count
+    new_bytes = ser.read(ser.in_waiting)  # Read all available bytes
+    byte_count += len(new_bytes)  # Track byte count
+    if new_bytes:
+        byte_buffer += new_bytes  # Append to buffer
+
+    num_complete_frames = len(byte_buffer) // BYTE_PER_FRAME
+    valid_bytes_length = num_complete_frames * BYTE_PER_FRAME
+
+    if valid_bytes_length == 0:
+        return np.empty((0, FRAME_SIZE), dtype=np.int16)
+
+    raw_values = byte_buffer[:valid_bytes_length]
+    byte_buffer = byte_buffer[valid_bytes_length:]
+
+    try:
+        int_values = np.array(struct.unpack(f'<{num_complete_frames * FRAME_SIZE}h', raw_values))
+        int_values = int_values.reshape(-1, FRAME_SIZE)
+        return int_values
+    except struct.error:
+        print("Struct unpacking failed! Possible misalignment.")
+        return np.empty((0, FRAME_SIZE), dtype=np.int16)
+
+def update_auto(frame):
+    """ Update the plot with new serial data. """
+    global y_data, last_time, byte_count
+    int_values = read_serial_data()
+
+    if int_values.shape[0] > 0:
+        num_new_values = int_values.shape[0]
+        max_values = min(num_new_values, BUFFER_SIZE)
+        y_data = np.roll(y_data, -max_values, axis=1)
+        y_data[:, -max_values:] = int_values[-max_values:].T
+
+        for i in range(FRAME_SIZE):
+            lines[i].set_ydata(y_data[i])
+            axes[i].set_ylim(y_data[i].min() - 100, y_data[i].max() + 100)
+
+    # Update byte rate every second
+    current_time = time.time()
+    if current_time - last_time >= 1.0:
+        text_box.set_text(f"Bytes/sec: {byte_count}")
+        byte_count = 0
+        last_time = current_time
+
+    return lines
+
+def update_manual(event):
+    update_auto(None)
+    plt.draw()
+
+def drop_bytes(n):
+    global byte_buffer
+    if len(byte_buffer) >= n:
+        byte_buffer = byte_buffer[n:]
+        print(f"Dropped {n} byte(s) to realign data.")
+
+def stop_update(event):
+    global ani
+    ani.event_source.stop()
+    print("Update Stopped!")
+
+def resume_update(event):
+    global ani
+    ani.event_source.start()
+    print("Update Resumed!")
+
+ani = animation.FuncAnimation(fig, update_auto, interval=5, blit=False)
+
+button_positions = [
+    (0.1, 0.05, "Drop 1", lambda event: drop_bytes(1)),
+    (0.3, 0.05, "Drop 2", lambda event: drop_bytes(2)),
+    (0.5, 0.05, "Update", update_manual),
+    (0.7, 0.05, "Stop", stop_update),
+    (0.7, 0.15, "Resume", resume_update)
+]
+
+buttons = []
+for x, y, label, func in button_positions:
+    ax_button = plt.axes([x, y, 0.15, 0.075])
+    btn = Button(ax_button, label)
+    btn.on_clicked(func)
+    buttons.append(btn)
+
+plt.show()
+
